@@ -29,6 +29,12 @@ enum AvailabilityStatus {
   HIDDEN
 }
 
+enum MenuStatus {
+  ACTIVE
+  PAUSED
+  DELETED
+}
+
 enum BusinessDayStatus {
   OPEN
   CLOSED
@@ -103,6 +109,7 @@ model Restaurant {
   auditEvents AuditEvent[]
   adminUsers  AdminUser[]
   adminAuditEvents AdminAuditEvent[]
+  menus       Menu[]
 }
 
 model RestaurantTranslation {
@@ -312,10 +319,12 @@ model Category {
   restaurantId String
   imageUrl     String?
   status       AvailabilityStatus @default(AVAILABLE)
+  deletedAt    DateTime?
   sortOrder    Int
   restaurant   Restaurant         @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   translations CategoryTranslation[]
   dishes       Dish[]
+  menuLinks    MenuCategory[]
 
   @@index([restaurantId, sortOrder])
 }
@@ -338,13 +347,67 @@ model Dish {
   priceAmount  Decimal            @db.Decimal(12, 2)
   calories     Int?
   status       AvailabilityStatus @default(AVAILABLE)
+  deletedAt    DateTime?
   sortOrder    Int
   restaurant   Restaurant         @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   category     Category           @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   translations DishTranslation[]
   chequeItems  ChequeItem[]
+  menuLinks    MenuDish[]
 
   @@index([restaurantId, categoryId, sortOrder])
+}
+
+model Menu {
+  id           String     @id @default(cuid())
+  restaurantId String
+  status       MenuStatus @default(ACTIVE)
+  isDefault    Boolean    @default(false)
+  deletedAt    DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  translations MenuTranslation[]
+  categories   MenuCategory[]
+  dishes       MenuDish[]
+
+  @@index([restaurantId, status])
+}
+
+model MenuTranslation {
+  id           String       @id @default(cuid())
+  menuId       String
+  languageCode LanguageCode
+  name         String
+  description  String?
+  menu         Menu         @relation(fields: [menuId], references: [id], onDelete: Cascade)
+
+  @@unique([menuId, languageCode])
+}
+
+model MenuCategory {
+  menuId       String
+  categoryId   String
+  sortOrder    Int
+  status       AvailabilityStatus @default(AVAILABLE)
+  menu         Menu               @relation(fields: [menuId], references: [id], onDelete: Cascade)
+  category     Category           @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@id([menuId, categoryId])
+  @@index([menuId, sortOrder])
+}
+
+model MenuDish {
+  menuId        String
+  dishId        String
+  sortOrder     Int
+  status        AvailabilityStatus @default(AVAILABLE)
+  priceOverride Decimal?           @db.Decimal(12, 2)
+  menu          Menu               @relation(fields: [menuId], references: [id], onDelete: Cascade)
+  dish          Dish               @relation(fields: [dishId], references: [id], onDelete: Restrict)
+
+  @@id([menuId, dishId])
+  @@index([menuId, sortOrder])
 }
 
 model DishTranslation {
@@ -522,4 +585,3 @@ model AuditEvent {
   @@index([restaurantId, createdAt])
   @@index([entityType, entityId])
 }
-
