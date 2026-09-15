@@ -35,6 +35,11 @@ enum MenuStatus {
   DELETED
 }
 
+enum MenuPurpose {
+  POS
+  QR
+}
+
 enum BusinessDayStatus {
   OPEN
   CLOSED
@@ -362,6 +367,11 @@ model Menu {
   id           String     @id @default(cuid())
   restaurantId String
   status       MenuStatus @default(ACTIVE)
+  purpose      MenuPurpose @default(POS)
+  /// A platform-owned menu, such as the restaurant's public QR menu.
+  /// System menus remain editable but cannot be paused or deleted.
+  isSystem     Boolean    @default(false)
+  code         String?
   isDefault    Boolean    @default(false)
   deletedAt    DateTime?
   createdAt    DateTime   @default(now())
@@ -372,6 +382,7 @@ model Menu {
   dishes       MenuDish[]
 
   @@index([restaurantId, status])
+  @@unique([restaurantId, code])
 }
 
 model MenuTranslation {

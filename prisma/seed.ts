@@ -23,6 +23,14 @@ async function main(): Promise<void> {
     update: {},
     create: { slug: 'panda-house', translations: { create: [{ languageCode: 'ka', name: 'Panda House' }, { languageCode: 'en', name: 'Panda House' }, { languageCode: 'ru', name: 'Panda House' }] } },
   });
+  const qrMenu = await prisma.menu.findFirst({ where: { restaurantId: restaurant.id, code: 'QR_MENU' } });
+  if (!qrMenu) {
+    const [categories, dishes] = await Promise.all([
+      prisma.category.findMany({ where: { restaurantId: restaurant.id, deletedAt: null }, orderBy: { sortOrder: 'asc' } }),
+      prisma.dish.findMany({ where: { restaurantId: restaurant.id, deletedAt: null }, orderBy: { sortOrder: 'asc' } }),
+    ]);
+    await prisma.menu.create({ data: { restaurantId: restaurant.id, code: 'QR_MENU', purpose: 'QR', isSystem: true, translations: { create: [{ languageCode: 'ka', name: 'QR მენიუ' }, { languageCode: 'en', name: 'QR Menu' }, { languageCode: 'ru', name: 'QR меню' }] }, categories: { create: categories.map((category) => ({ categoryId: category.id, sortOrder: category.sortOrder })) }, dishes: { create: dishes.map((dish) => ({ dishId: dish.id, sortOrder: dish.sortOrder })) } } });
+  }
   await prisma.restaurantPosSettings.upsert({ where: { restaurantId: restaurant.id }, update: {}, create: { restaurantId: restaurant.id } });
 
   const permissionRecords = await Promise.all(permissions.map((code) => prisma.permission.upsert({ where: { code }, update: { description: code }, create: { code, description: code } })));
