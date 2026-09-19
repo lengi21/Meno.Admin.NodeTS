@@ -1,0 +1,41 @@
+name: meno-admin
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3010
+      DATABASE_URL: postgresql://meno:${POSTGRES_PASSWORD}@meno-postgres:5432/meno_pos?schema=public
+      JWT_SECRET: ${JWT_SECRET}
+      UPLOAD_PUBLIC_BASE_URL: https://admin.meno.pandahouse2025.ge/api/uploads
+    env_file:
+      - .env.production
+    volumes:
+      - meno-admin-uploads:/app/uploads
+    ports:
+      - '127.0.0.1:8110:3010'
+    networks: [meno]
+
+  web:
+    build:
+      context: ../../meno_admin
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on: [api]
+    ports:
+      - '127.0.0.1:8181:80'
+    networks: [meno]
+
+volumes:
+  meno-admin-uploads:
+
+networks:
+  meno:
+    external: true
+    name: meno
+
+
