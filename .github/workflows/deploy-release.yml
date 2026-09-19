@@ -1,41 +1,62 @@
-name: meno-admin
+name: Deploy Meno Admin API release
 
-services:
-  api:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      PORT: 3010
-      DATABASE_URL: postgresql://meno:${POSTGRES_PASSWORD}@meno-postgres:5432/meno_pos?schema=public
-      JWT_SECRET: ${JWT_SECRET}
-      UPLOAD_PUBLIC_BASE_URL: https://admin.meno.pandahouse2025.ge/api/uploads
-    env_file:
-      - .env.production
-    volumes:
-      - meno-admin-uploads:/app/uploads
-    ports:
-      - '127.0.0.1:8110:3010'
-    networks: [meno]
+on:
+  push:
+    tags: ['release/**']
 
-  web:
-    build:
-      context: ../../meno_admin
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    depends_on: [api]
-    ports:
-      - '127.0.0.1:8181:80'
-    networks: [meno]
+permissions:
+  contents: read
 
-volumes:
-  meno-admin-uploads:
+concurrency:
+  group: meno-admin-production-api
+  cancel-in-progress: false
 
-networks:
-  meno:
-    external: true
-    name: meno
+jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Validate tag and release branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_name="${GITHUB_REF_NAME}"
+          [[ "$tag_name" =~ ^release/([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo 'Use release/x.y.z tags.'; exit 1; }
+          major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"; version="$major.$minor.${BASH_REMATCH[3]}"; branch="release/$major.$minor"
+          git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
+          [[ "$(git rev-list -n 1 "$tag_name")" == "$(git rev-parse "origin/$branch")" ]] || { echo "$tag_name must point to $branch head."; exit 1; }
+          latest="$(git tag -l 'release/*' | grep -E '^release/[0-9]+\.[0-9]+\.[0-9]+$' | grep -Fvx "$tag_name" | sed 's#^release/##' | sort -V | tail -n 1 || true)"
+          [[ -z "$latest" || "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n 1)" == "$version" ]] || { echo "$version must be newer than $latest."; exit 1; }
 
-
+  deploy:
+    needs: validate-release
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+      - uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: '${{ secrets.VPS_SSH_KEY }}'
+      - name: Deploy API
+        env:
+          VPS_HOST: '${{ secrets.VPS_HOST }}'
+          VPS_USER: '${{ secrets.VPS_USER }}'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          tar --exclude-vcs --exclude='deploy/.env.production' -cf /tmp/meno-admin-api.tar .
+          scp /tmp/meno-admin-api.tar "$VPS_USER@$VPS_HOST:/tmp/"
+          ssh "$VPS_USER@$VPS_HOST" 'bash -s' <<'REMOTE'
+            set -euo pipefail
+            stage=$(mktemp -d)
+            trap 'rm -rf "$stage" /tmp/meno-admin-api.tar' EXIT
+            tar -xf /tmp/meno-admin-api.tar -C "$stage"
+            rsync -a --delete --exclude 'deploy/.env.production' "$stage/" /opt/meno/meno_admin.NodeTS/
+            cd /opt/meno/meno_admin.NodeTS
+            docker compose -p meno-admin --env-file deploy/.env.production -f deploy/docker-compose.production.yml build api
+            docker compose -p meno-admin --env-file deploy/.env.production -f deploy/docker-compose.production.yml up -d --no-deps api
+          REMOTE
