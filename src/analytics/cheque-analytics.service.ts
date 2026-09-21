@@ -15,18 +15,22 @@ export class ChequeAnalyticsService {
 
   async filters(actor: AdminTokenPayload) {
     await this.access.assert(actor, 'analytics.view');
-    const [halls, staff] = await Promise.all([
+    const [halls, staff, businessDays] = await Promise.all([
       this.prisma.hall.findMany({ where: { restaurantId: actor.restaurantId }, select: { id: true, name: true, tables: { where: { isActive: true }, select: { id: true, name: true } } }, orderBy: { sortOrder: 'asc' } }),
       this.prisma.staffMember.findMany({ where: { restaurantId: actor.restaurantId }, select: { id: true, firstName: true, lastName: true }, orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }] }),
+      this.prisma.businessDay.findMany({ where: { restaurantId: actor.restaurantId }, select: { id: true, businessDate: true, status: true }, orderBy: { businessDate: 'desc' }, take: 90 }),
     ]);
-    return { halls, staff: staff.map((member) => ({ id: member.id, name: `${member.firstName} ${member.lastName}` })) };
+    const defaultBusinessDayId = businessDays.find((day) => day.status === 'OPEN')?.id ?? businessDays[0]?.id ?? null;
+    return { halls, staff: staff.map((member) => ({ id: member.id, name: `${member.firstName} ${member.lastName}` })), businessDays, defaultBusinessDayId };
   }
 
   async list(actor: AdminTokenPayload, query: Record<string, string | undefined>) {
     await this.access.assert(actor, 'analytics.view');
     const status = this.status(query.status);
+    const businessDayId = await this.businessDayId(actor.restaurantId, query.businessDayId);
     const where: Prisma.ChequeWhereInput = {
       restaurantId: actor.restaurantId,
+      ...(businessDayId ? { businessDayId } : {}),
       ...(status ? { status } : {}),
       ...(query.ownerId ? { openedByMemberId: query.ownerId } : {}),
       ...(query.tableId ? { tableId: query.tableId } : {}),
@@ -64,15 +68,16 @@ export class ChequeAnalyticsService {
     const cheque = await this.prisma.cheque.findFirst({
       where: { id: chequeId, restaurantId: actor.restaurantId },
       include: {
-        restaurant: { include: { translations: true } },
+        restaurant: { include: { translations: true, settings: true } },
         table: { include: { hall: true } },
         printJobs: { where: { type: 'ADVANCE_CHEQUE' }, orderBy: { createdAt: 'desc' }, take: 1 },
+        items: { where: { status: { not: 'VOIDED' } }, select: { dishName: true, quantity: true, unitPrice: true } },
+        discounts: { select: { amount: true } },
       },
     });
     if (!cheque) throw new NotFoundException('Cheque not found');
     const job = cheque.printJobs[0];
-    if (!job) return { available: false, chequeNumber: cheque.sequenceNumber };
-    const payload = this.receiptPayload(job.payload);
+    const payload = job ? this.receiptPayload(job.payload) : {};
     const language = payload.language === 'ka' || payload.language === 'ru' ? payload.language : 'en';
     const restaurantName = payload.restaurantName
       ?? cheque.restaurant.translations.find((translation) => translation.languageCode === language)?.name
@@ -80,15 +85,16 @@ export class ChequeAnalyticsService {
       ?? cheque.restaurant.slug;
     return {
       available: true,
-      printedAt: job.createdAt,
+      printedAt: job?.createdAt ?? cheque.openedAt,
+      isLive: !job,
       receipt: {
         restaurantName,
         hallName: payload.hallName ?? cheque.table.hall.name,
         tableName: payload.tableName ?? cheque.table.name,
         chequeNumber: payload.chequeNumber ?? cheque.sequenceNumber,
         language,
-        total: payload.total ?? Number(cheque.totalAmount ?? 0),
-        items: payload.items ?? [],
+        total: payload.total ?? this.liveTotal(cheque, Number(cheque.restaurant.settings?.serviceChargePercent ?? 0)),
+        items: payload.items ?? cheque.items.map((item) => ({ name: item.dishName, quantity: item.quantity, unitPrice: Number(item.unitPrice) })),
       },
     };
   }
@@ -120,6 +126,23 @@ export class ChequeAnalyticsService {
     };
   }
 
+  private async businessDayId(restaurantId: string, requestedId: string | undefined): Promise<string | undefined> {
+    if (requestedId) {
+      const day = await this.prisma.businessDay.findFirst({ where: { id: requestedId, restaurantId }, select: { id: true } });
+      return day?.id;
+    }
+    const current = await this.prisma.businessDay.findFirst({ where: { restaurantId, status: 'OPEN' }, orderBy: { businessDate: 'desc' }, select: { id: true } });
+    if (current) return current.id;
+    return (await this.prisma.businessDay.findFirst({ where: { restaurantId }, orderBy: { businessDate: 'desc' }, select: { id: true } }))?.id;
+  }
+
+  private liveTotal(cheque: { items: readonly { quantity: number; unitPrice: Prisma.Decimal }[]; discounts: readonly { amount: Prisma.Decimal }[]; totalAmount: Prisma.Decimal | null }, serviceFeePercent: number): number {
+    if (cheque.totalAmount) return Number(cheque.totalAmount);
+    const subtotal = cheque.items.reduce((sum, item) => sum + Number(item.unitPrice) * item.quantity, 0);
+    const discount = cheque.discounts.reduce((sum, item) => sum + Number(item.amount), 0);
+    const serviceFee = subtotal * serviceFeePercent / 100;
+    return Math.max(0, Number((subtotal + serviceFee - discount).toFixed(2)));
+  }
   private status(value: string | undefined): ChequeStatus | undefined {
     if (!value || value === 'ALL') return undefined;
     return Object.values(ChequeStatus).includes(value as ChequeStatus) ? value as ChequeStatus : ChequeStatus.CLOSED;
@@ -135,11 +158,11 @@ export class ChequeAnalyticsService {
 
   private sorts(value: string | undefined): readonly SortRule[] {
     const allowed = new Set<SortKey>(['openedAt', 'chequeNumber', 'owner', 'hall', 'table', 'amount', 'discountPercent', 'total', 'payment', 'clientPaid', 'closedAt']);
-    const rules = (value ?? 'closedAt:desc').split(',').map((part) => {
+    const rules = (value ?? 'openedAt:desc').split(',').map((part) => {
       const [key, direction] = part.split(':');
       return allowed.has(key as SortKey) ? { key: key as SortKey, direction: direction === 'asc' ? 'asc' as const : 'desc' as const } : null;
     }).filter((rule): rule is SortRule => rule !== null);
-    return rules.length ? rules : [{ key: 'closedAt', direction: 'desc' }];
+    return rules.length ? rules : [{ key: 'openedAt', direction: 'desc' }];
   }
 
   private compare(left: ReturnType<ChequeAnalyticsService['row']>, right: ReturnType<ChequeAnalyticsService['row']>, sorts: readonly SortRule[]): number {
