@@ -7,7 +7,7 @@ const permissions = [
   'staff.view', 'staff.create', 'staff.update', 'staff.delete', 'staff.pin.reset', 'staff.pin.resend',
   'roles.view', 'roles.manage',
   'menus.view', 'menus.manage', 'categories.manage', 'dishes.manage', 'halls.manage',
-  'audit.view', 'printers.manage', 'business-day.manage',
+  'audit.view', 'analytics.view', 'printers.manage', 'business-day.manage',
   'pos.halls.view', 'pos.cheque.open', 'pos.cheque.modify-unordered', 'pos.order.send',
   'pos.advance-cheque.print', 'pos.cheque.close', 'pos.discount.apply', 'pos.cheque.cancel',
   'pos.day-balance.view', 'pos.day-balance.print', 'pos.printers.use',

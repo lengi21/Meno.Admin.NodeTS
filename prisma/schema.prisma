@@ -461,6 +461,14 @@ model Cheque {
   closedAt            DateTime?
   advancePrintedAt    DateTime?
   advanceVersion      Int?
+  /// Immutable financial snapshot written when the cheque is closed. It keeps analytics stable when settings change later.
+  subtotalAmount      Decimal?     @db.Decimal(12, 2)
+  serviceFeeAmount    Decimal?     @db.Decimal(12, 2)
+  serviceFeePercent   Decimal?     @db.Decimal(5, 2)
+  discountAmount      Decimal?     @db.Decimal(12, 2)
+  discountPercent     Decimal?     @db.Decimal(5, 2)
+  totalAmount         Decimal?     @db.Decimal(12, 2)
+  clientPaidAmount    Decimal?     @db.Decimal(12, 2)
   version             Int          @default(1)
   restaurant          Restaurant   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   table               DiningTable  @relation(fields: [tableId], references: [id], onDelete: Restrict)
