@@ -108,7 +108,7 @@ export class ChequeAnalyticsService {
       openedAt: cheque.openedAt,
       chequeNumber: cheque.sequenceNumber,
       owner: { name: `${cheque.openedBy.firstName} ${cheque.openedBy.lastName}` },
-      hallName: payload.hallName ?? cheque.table.hall.name,
+      hallName: cheque.table.hall.name,
       tableName: cheque.table.name,
       amountBeforeDiscount: grossAmount,
       discountPercent,
