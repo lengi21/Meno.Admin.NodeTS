@@ -7,7 +7,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 type SortKey = 'openedAt' | 'chequeNumber' | 'owner' | 'hall' | 'table' | 'amount' | 'discountPercent' | 'total' | 'payment' | 'clientPaid' | 'closedAt';
 type SortRule = { readonly key: SortKey; readonly direction: 'asc' | 'desc' };
 type ReceiptItem = { readonly name: string; readonly quantity: number; readonly unitPrice: number };
-type ReceiptPayload = { readonly chequeNumber?: number; readonly tableName?: string; readonly language?: string; readonly total?: number; readonly items?: readonly ReceiptItem[] };
+type ReceiptPayload = { readonly chequeNumber?: number; readonly restaurantName?: string; readonly hallName?: string; readonly tableName?: string; readonly language?: string; readonly total?: number; readonly items?: readonly ReceiptItem[] };
 
 @Injectable()
 export class ChequeAnalyticsService {
@@ -74,7 +74,8 @@ export class ChequeAnalyticsService {
     if (!job) return { available: false, chequeNumber: cheque.sequenceNumber };
     const payload = this.receiptPayload(job.payload);
     const language = payload.language === 'ka' || payload.language === 'ru' ? payload.language : 'en';
-    const restaurantName = cheque.restaurant.translations.find((translation) => translation.languageCode === language)?.name
+    const restaurantName = payload.restaurantName
+      ?? cheque.restaurant.translations.find((translation) => translation.languageCode === language)?.name
       ?? cheque.restaurant.translations.find((translation) => translation.languageCode === 'en')?.name
       ?? cheque.restaurant.slug;
     return {
@@ -82,7 +83,7 @@ export class ChequeAnalyticsService {
       printedAt: job.createdAt,
       receipt: {
         restaurantName,
-        hallName: cheque.table.hall.name,
+        hallName: payload.hallName ?? cheque.table.hall.name,
         tableName: payload.tableName ?? cheque.table.name,
         chequeNumber: payload.chequeNumber ?? cheque.sequenceNumber,
         language,
@@ -107,7 +108,7 @@ export class ChequeAnalyticsService {
       openedAt: cheque.openedAt,
       chequeNumber: cheque.sequenceNumber,
       owner: { name: `${cheque.openedBy.firstName} ${cheque.openedBy.lastName}` },
-      hallName: cheque.table.hall.name,
+      hallName: payload.hallName ?? cheque.table.hall.name,
       tableName: cheque.table.name,
       amountBeforeDiscount: grossAmount,
       discountPercent,
@@ -173,6 +174,8 @@ export class ChequeAnalyticsService {
     }) : undefined;
     return {
       chequeNumber: typeof source['chequeNumber'] === 'number' ? source['chequeNumber'] : undefined,
+      restaurantName: typeof source['restaurantName'] === 'string' ? source['restaurantName'] : undefined,
+      hallName: typeof source['hallName'] === 'string' ? source['hallName'] : undefined,
       tableName: typeof source['tableName'] === 'string' ? source['tableName'] : undefined,
       language: typeof source['language'] === 'string' ? source['language'] : undefined,
       total: typeof source['total'] === 'number' ? source['total'] : undefined,
