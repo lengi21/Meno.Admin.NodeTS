@@ -296,14 +296,18 @@ model AdminAuditEvent {
 model Hall {
   id           String     @id @default(cuid())
   restaurantId String
+  menuId       String?
   name         String
   sortOrder    Int
   isActive     Boolean    @default(true)
+  deletedAt    DateTime?
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  menu         Menu?      @relation(fields: [menuId], references: [id], onDelete: SetNull)
   tables       DiningTable[]
 
   @@unique([restaurantId, name])
   @@index([restaurantId, sortOrder])
+  @@index([menuId])
 }
 
 model DiningTable {
@@ -312,6 +316,7 @@ model DiningTable {
   name      String
   sortOrder Int
   isActive  Boolean @default(true)
+  deletedAt DateTime?
   hall      Hall   @relation(fields: [hallId], references: [id], onDelete: Cascade)
   cheques   Cheque[]
 
@@ -380,6 +385,7 @@ model Menu {
   translations MenuTranslation[]
   categories   MenuCategory[]
   dishes       MenuDish[]
+  halls        Hall[]
 
   @@index([restaurantId, status])
   @@unique([restaurantId, code])

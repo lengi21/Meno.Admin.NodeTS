@@ -6,7 +6,9 @@ const permissions = [
   'settings.view', 'settings.update',
   'staff.view', 'staff.create', 'staff.update', 'staff.delete', 'staff.pin.reset', 'staff.pin.resend',
   'roles.view', 'roles.manage',
-  'menus.view', 'menus.manage', 'categories.manage', 'dishes.manage', 'halls.manage',
+  'menus.view', 'menus.manage', 'categories.manage', 'dishes.manage',
+  'halls.view', 'halls.create', 'halls.update', 'halls.pause', 'halls.order', 'halls.delete',
+  'tables.view', 'tables.create', 'tables.update', 'tables.pause', 'tables.order', 'tables.delete',
   'audit.view', 'analytics.view', 'printers.manage', 'business-day.manage',
   'pos.halls.view', 'pos.cheque.open', 'pos.cheque.modify-unordered', 'pos.order.send',
   'pos.advance-cheque.print', 'pos.cheque.close', 'pos.discount.apply', 'pos.cheque.cancel',
@@ -37,7 +39,7 @@ async function main(): Promise<void> {
   const ownerRole = await prisma.role.upsert({ where: { restaurantId_name: { restaurantId: restaurant.id, name: 'Owner' } }, update: { isOwnerRole: true }, create: { restaurantId: restaurant.id, name: 'Owner', isOwnerRole: true } });
   await Promise.all(permissionRecords.map((permission) => prisma.rolePermission.upsert({ where: { roleId_permissionId: { roleId: ownerRole.id, permissionId: permission.id } }, update: {}, create: { roleId: ownerRole.id, permissionId: permission.id } })));
   const defaultRoles = [
-    { name: 'Manager', description: 'Restaurant operations manager', permissions: ['settings.view', 'halls.manage', 'menus.view', 'menus.manage', 'categories.manage', 'dishes.manage', 'staff.view', 'audit.view', 'printers.manage', 'business-day.manage'] },
+    { name: 'Manager', description: 'Restaurant operations manager', permissions: ['settings.view', 'halls.view', 'halls.create', 'halls.update', 'halls.pause', 'halls.order', 'halls.delete', 'tables.view', 'tables.create', 'tables.update', 'tables.pause', 'tables.order', 'tables.delete', 'menus.view', 'menus.manage', 'categories.manage', 'dishes.manage', 'staff.view', 'audit.view', 'printers.manage', 'business-day.manage'] },
     { name: 'Staff', description: 'POS operational access', permissions: ['pos.halls.view', 'pos.cheque.open', 'pos.cheque.modify-unordered', 'pos.order.send', 'pos.advance-cheque.print', 'pos.cheque.close', 'pos.discount.apply', 'pos.cheque.cancel', 'pos.day-balance.view', 'pos.day-balance.print', 'pos.printers.use'] },
   ];
   for (const roleConfig of defaultRoles) {
