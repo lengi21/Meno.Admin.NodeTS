@@ -146,6 +146,8 @@ model RestaurantPosSettings {
   serviceChargePercent   Decimal?   @db.Decimal(5, 2)
   taxPercent             Decimal?   @db.Decimal(5, 2)
   roundingEnabled        Boolean    @default(false)
+  defaultLanguage        LanguageCode @default(ka)
+  paymentBanks           Json?
   restaurant             Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
 }
 

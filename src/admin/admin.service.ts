@@ -1,5 +1,5 @@
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, PrintJobType } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { randomInt } from 'node:crypto';
 import { AdminTokenPayload } from '../auth/auth.types.js';
@@ -9,6 +9,7 @@ import { CreateStaffDto } from './dto/create-staff.dto.js';
 import { SaveRoleDto } from './dto/save-role.dto.js';
 import { UpdatePosSettingsDto } from './dto/update-pos-settings.dto.js';
 import { UpdateStaffDto } from './dto/update-staff.dto.js';
+import { SaveAdminPrinterDto } from './dto/save-admin-printer.dto.js';
 
 @Injectable()
 export class AdminService {
@@ -20,8 +21,48 @@ export class AdminService {
   private staffResult(staff: { id: string; firstName: string; lastName: string; email: string | null; phone: string | null; isActive: boolean; roles: { role: { id: string; name: string } }[]; permissions: { permission: { code: string }; isGranted: boolean }[] }) { return { id: staff.id, firstName: staff.firstName, lastName: staff.lastName, email: staff.email, phone: staff.phone, isActive: staff.isActive, roles: staff.roles.map((item) => item.role), directPermissions: staff.permissions.map((item) => ({ code: item.permission.code, isGranted: item.isGranted })) }; }
   private deliveryTarget(staff: { email: string | null; phone: string | null }) { if (staff.email) return { type: 'email', destination: staff.email }; if (staff.phone) return { type: 'sms', destination: staff.phone }; return { type: 'in_app', destination: 'Admin panel', mocked: true }; }
 
-  async getSettings(actor: AdminTokenPayload, restaurantId: string) { await this.access.assert(actor, 'settings.view'); this.ensureRestaurant(actor, restaurantId); const settings = await this.prisma.restaurantPosSettings.findUnique({ where: { restaurantId } }); if (!settings) throw new NotFoundException('Restaurant settings not found'); return { restaurantId, businessDayStart: settings.businessDayStartsAt, businessDayEnd: settings.businessDayEndsAt, serviceFeePercent: Number(settings.serviceChargePercent ?? 0), defaultLanguage: 'ka' as const }; }
-  async updateSettings(actor: AdminTokenPayload, restaurantId: string, patch: UpdatePosSettingsDto) { await this.access.assert(actor, 'settings.update'); this.ensureRestaurant(actor, restaurantId); const settings = await this.prisma.restaurantPosSettings.update({ where: { restaurantId }, data: { businessDayStartsAt: patch.businessDayStart, businessDayEndsAt: patch.businessDayEnd, serviceChargePercent: patch.serviceFeePercent } }); await this.audit(actor, 'POS_SETTINGS_UPDATED', 'RestaurantPosSettings', settings.id, patch as Prisma.InputJsonValue); return this.getSettings(actor, restaurantId); }
+  async getSettings(actor: AdminTokenPayload, restaurantId: string) {
+    await this.access.assert(actor, 'settings.view'); this.ensureRestaurant(actor, restaurantId);
+    const [settings, menus] = await Promise.all([
+      this.prisma.restaurantPosSettings.findUnique({ where: { restaurantId } }),
+      this.prisma.menu.findMany({ where: { restaurantId, purpose: 'POS', status: 'ACTIVE' }, include: { translations: { select: { languageCode: true, name: true } } }, orderBy: { createdAt: 'asc' } }),
+    ]);
+    if (!settings) throw new NotFoundException('Restaurant settings not found');
+    return { restaurantId, businessDayStart: settings.businessDayStartsAt, businessDayEnd: settings.businessDayEndsAt, serviceFeePercent: Number(settings.serviceChargePercent ?? 0), defaultLanguage: settings.defaultLanguage, paymentBanks: Array.isArray(settings.paymentBanks) ? settings.paymentBanks : [], defaultMenuId: menus.find((menu) => menu.isDefault)?.id ?? null, menus };
+  }
+  async updateSettings(actor: AdminTokenPayload, restaurantId: string, patch: UpdatePosSettingsDto) {
+    await this.access.assert(actor, 'settings.update'); this.ensureRestaurant(actor, restaurantId);
+    if (patch.defaultMenuId !== undefined && patch.defaultMenuId !== null) {
+      const menu = await this.prisma.menu.findFirst({ where: { id: patch.defaultMenuId, restaurantId, purpose: 'POS', status: 'ACTIVE' }, select: { id: true } });
+      if (!menu) throw new NotFoundException('Active POS menu not found');
+    }
+    const settings = await this.prisma.$transaction(async (tx) => {
+      if (patch.defaultMenuId !== undefined) {
+        await tx.menu.updateMany({ where: { restaurantId, purpose: 'POS' }, data: { isDefault: false } });
+        if (patch.defaultMenuId) await tx.menu.update({ where: { id: patch.defaultMenuId }, data: { isDefault: true } });
+      }
+      return tx.restaurantPosSettings.upsert({ where: { restaurantId }, update: { businessDayStartsAt: patch.businessDayStart, businessDayEndsAt: patch.businessDayEnd, serviceChargePercent: patch.serviceFeePercent, defaultLanguage: patch.defaultLanguage, paymentBanks: patch.paymentBanks as Prisma.InputJsonValue | undefined }, create: { restaurantId, businessDayStartsAt: patch.businessDayStart ?? '09:00', businessDayEndsAt: patch.businessDayEnd ?? '23:00', serviceChargePercent: patch.serviceFeePercent ?? 0, defaultLanguage: patch.defaultLanguage ?? 'ka', paymentBanks: patch.paymentBanks as Prisma.InputJsonValue | undefined } });
+    });
+    await this.audit(actor, 'POS_SETTINGS_UPDATED', 'RestaurantPosSettings', settings.id, patch as Prisma.InputJsonValue); return this.getSettings(actor, restaurantId);
+  }
+
+  async listPrinters(actor: AdminTokenPayload) { await this.access.assert(actor, 'printers.manage'); return this.prisma.printer.findMany({ where: { restaurantId: actor.restaurantId }, include: { routes: true }, orderBy: { name: 'asc' } }); }
+  async savePrinter(actor: AdminTokenPayload, data: SaveAdminPrinterDto, printerId?: string) {
+    await this.access.assert(actor, 'printers.manage');
+    const routes = (data.routes ?? []).filter((route): route is PrintJobType => Object.values(PrintJobType).includes(route as PrintJobType));
+    if (routes.length !== (data.routes ?? []).length) throw new ConflictException('Unsupported printer route');
+    const printer = await this.prisma.$transaction(async (tx) => {
+      const existing = printerId ? await tx.printer.findFirst({ where: { id: printerId, restaurantId: actor.restaurantId } }) : null;
+      if (printerId && !existing) throw new NotFoundException('Printer not found');
+      const record = existing
+        ? await tx.printer.update({ where: { id: existing.id }, data: { name: data.name.trim(), connection: data.connection, address: data.address?.trim() || null, paperWidthMm: data.paperWidthMm ?? 80, isActive: data.isActive ?? true } })
+        : await tx.printer.create({ data: { restaurantId: actor.restaurantId, name: data.name.trim(), connection: data.connection, address: data.address?.trim() || null, paperWidthMm: data.paperWidthMm ?? 80, isActive: data.isActive ?? true } });
+      if (data.routes !== undefined) { await tx.printerRoute.deleteMany({ where: { printerId: record.id } }); if (routes.length) await tx.printerRoute.createMany({ data: routes.map((jobType) => ({ printerId: record.id, jobType })) }); }
+      return tx.printer.findUniqueOrThrow({ where: { id: record.id }, include: { routes: true } });
+    });
+    await this.audit(actor, printerId ? 'PRINTER_UPDATED' : 'PRINTER_CREATED', 'Printer', printer.id, { name: printer.name, routes }); return printer;
+  }
+  async deletePrinter(actor: AdminTokenPayload, printerId: string) { await this.access.assert(actor, 'printers.manage'); const result = await this.prisma.printer.updateMany({ where: { id: printerId, restaurantId: actor.restaurantId }, data: { isActive: false } }); if (!result.count) throw new NotFoundException('Printer not found'); await this.audit(actor, 'PRINTER_DISABLED', 'Printer', printerId); return { id: printerId, isActive: false }; }
 
   async listStaff(actor: AdminTokenPayload) { await this.access.assert(actor, 'staff.view'); const staff = await this.prisma.staffMember.findMany({ where: { restaurantId: actor.restaurantId }, include: { roles: { include: { role: true } }, permissions: { include: { permission: true } } }, orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }] }); return staff.map((item) => this.staffResult(item)); }
   async createStaff(actor: AdminTokenPayload, data: CreateStaffDto) { await this.access.assert(actor, 'staff.create'); if (!data.email && !data.phone) throw new ConflictException('Email or phone is required'); const roles = await this.roleIds(actor.restaurantId, data.roleIds); const permissions = await this.permissionIds(data.permissionCodes); const pin = String(randomInt(0, 10000)).padStart(4, '0'); const staff = await this.prisma.staffMember.create({ data: { restaurantId: actor.restaurantId, firstName: data.firstName.trim(), lastName: data.lastName.trim(), email: data.email?.toLowerCase(), phone: data.phone?.trim(), pinHash: await argon2.hash(pin, { type: argon2.argon2id }), roles: { create: roles.map((roleId) => ({ roleId })) }, permissions: { create: permissions.map((permission) => ({ permissionId: permission.id, isGranted: true })) }, }, include: { roles: { include: { role: true } }, permissions: { include: { permission: true } } } }); const delivery = this.deliveryTarget(staff); await this.audit(actor, 'STAFF_CREATED', 'StaffMember', staff.id); await this.audit(actor, 'PIN_DELIVERY_MOCKED', 'StaffMember', staff.id, delivery); return { staff: this.staffResult(staff), generatedPin: pin, mockDelivery: delivery }; }
