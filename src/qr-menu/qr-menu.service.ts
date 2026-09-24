@@ -86,7 +86,9 @@ export class QrMenuService {
 
   async createDish(slug: string, draft: DishDraft) {
     const { restaurant, menu } = await this.qrMenu(slug);
-    this.assertTranslations(draft.translations, true);
+    // The legacy QR-admin editor does not collect descriptions.  They are
+    // optional menu copy, so only translated names are required here.
+    this.assertTranslations(draft.translations);
     if (!menu.categories.some((item) => item.categoryId === draft.categoryId)) throw new BadRequestException('The dish category is not included in the QR menu.');
     const sortOrder = menu.dishes.filter((item) => item.dish.categoryId === draft.categoryId).length + 1;
     const dish = await this.prisma.dish.create({ data: { restaurantId: restaurant.id, categoryId: draft.categoryId, imageUrl: this.blank(draft.imageUrl), priceAmount: draft.priceAmountMinor / 100, calories: draft.calories ?? null, status: this.dishStatus(draft), sortOrder, translations: { create: draft.translations.map((item) => ({ languageCode: item.languageCode, name: item.name.trim(), description: item.description?.trim() || '', recipe: this.blank(item.recipe ?? undefined) })) } }, include: { translations: true } });
@@ -96,7 +98,8 @@ export class QrMenuService {
 
   async updateDish(slug: string, dishId: string, draft: DishDraft) {
     const { restaurant, menu } = await this.qrMenu(slug);
-    this.assertTranslations(draft.translations, true);
+    // Keep QR-admin edits compatible with dishes that have no description.
+    this.assertTranslations(draft.translations);
     const linked = menu.dishes.find((item) => item.dishId === dishId);
     if (!linked || !menu.categories.some((item) => item.categoryId === draft.categoryId)) throw new NotFoundException('Dish not found.');
     const dish = await this.prisma.dish.update({ where: { id: dishId }, data: { restaurantId: restaurant.id, categoryId: draft.categoryId, imageUrl: this.blank(draft.imageUrl), priceAmount: draft.priceAmountMinor / 100, calories: draft.calories ?? null, status: this.dishStatus(draft), translations: { deleteMany: {}, create: draft.translations.map((item) => ({ languageCode: item.languageCode, name: item.name.trim(), description: item.description?.trim() || '', recipe: this.blank(item.recipe ?? undefined) })) } }, include: { translations: true } });
