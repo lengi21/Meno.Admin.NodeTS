@@ -38,7 +38,7 @@ export class QrMenuService {
 
   async adminCategories(slug: string) {
     const { menu } = await this.qrMenu(slug);
-    return menu.categories.map((link) => ({ category: this.category(link.category), dishCount: menu.dishes.filter((dish) => dish.dish.categoryId === link.categoryId).length }));
+    return menu.categories.filter((link) => !link.category.deletedAt).map((link) => ({ category: this.category(link.category), dishCount: menu.dishes.filter((dish) => dish.dish.categoryId === link.categoryId && !dish.dish.deletedAt).length }));
   }
 
   async createCategory(slug: string, draft: CategoryDraft) {
@@ -79,7 +79,7 @@ export class QrMenuService {
 
   async adminDishes(slug: string, page: number, pageSize: number, categoryId: string, status: string, query: string) {
     const { menu } = await this.qrMenu(slug);
-    const filtered = menu.dishes.filter((link) => (categoryId === 'all' || link.dish.categoryId === categoryId) && (!query || link.dish.translations.some((translation) => translation.name.toLowerCase().includes(query.toLowerCase()))) && (status === 'all' || (status === 'active' ? this.visibleDish(link) : !this.visibleDish(link))));
+    const filtered = menu.dishes.filter((link) => !link.dish.deletedAt && (categoryId === 'all' || link.dish.categoryId === categoryId) && (!query || link.dish.translations.some((translation) => translation.name.toLowerCase().includes(query.toLowerCase()))) && (status === 'all' || (status === 'active' ? this.visibleDish(link) : !this.visibleDish(link))));
     const start = (page - 1) * pageSize;
     return { page, pageSize, totalItems: filtered.length, items: filtered.slice(start, start + pageSize).map((link) => ({ dish: this.dish(link.dish, link.priceOverride), category: this.category(link.dish.category) })) };
   }
@@ -116,7 +116,10 @@ export class QrMenuService {
   async deleteDish(slug: string, dishId: string) {
     const { menu } = await this.qrMenu(slug);
     if (!menu.dishes.some((item) => item.dishId === dishId)) throw new NotFoundException('Dish not found.');
-    await this.prisma.dish.update({ where: { id: dishId }, data: { status: 'HIDDEN', deletedAt: new Date() } });
+    await this.prisma.$transaction([
+      this.prisma.dish.update({ where: { id: dishId }, data: { status: 'HIDDEN', deletedAt: new Date() } }),
+      this.prisma.menuDish.delete({ where: { menuId_dishId: { menuId: menu.id, dishId } } }),
+    ]);
   }
 
   async reorderDishes(slug: string, categoryId: string, dishIds: string[]) {
