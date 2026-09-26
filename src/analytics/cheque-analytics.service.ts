@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ChequeStatus, Prisma } from '@prisma/client';
+import ExcelJS from 'exceljs';
 import type { AdminTokenPayload } from '../auth/auth.types.js';
 import { AdminAccessService } from '../admin/admin-access.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -7,6 +8,10 @@ import { PrismaService } from '../prisma/prisma.service.js';
 type SortKey = 'openedAt' | 'chequeNumber' | 'owner' | 'hall' | 'table' | 'amount' | 'discountPercent' | 'total' | 'payment' | 'clientPaid' | 'closedAt';
 type SortRule = { readonly key: SortKey; readonly direction: 'asc' | 'desc' };
 type ReceiptItem = { readonly name: string; readonly quantity: number; readonly unitPrice: number };
+type SoldDishRow = { businessDate: string; dishId: string; dishName: string; quantity: number; grossAmount: number; discountAmount: number; serviceFeeAmount: number; totalAmount: number };
+type PaymentTotals = { businessDate: string; cash: number; card: number; transfer: number; total: number };
+type SalesSummary = { chequeCount: number; subtotal: number; discount: number; serviceFee: number; total: number };
+
 type ReceiptPayload = { readonly chequeNumber?: number; readonly restaurantName?: string; readonly hallName?: string; readonly tableName?: string; readonly language?: string; readonly total?: number; readonly items?: readonly ReceiptItem[] };
 
 @Injectable()
@@ -99,6 +104,134 @@ export class ChequeAnalyticsService {
     };
   }
 
+  /** Closed-cheque sales grouped by the business date and immutable dish snapshot. */
+  async soldDishes(actor: AdminTokenPayload, query: Record<string, string | undefined>) {
+    await this.access.assert(actor, 'analytics.view');
+    const businessDayId = await this.businessDayId(actor.restaurantId, query.businessDayId);
+    const range = this.businessDateRange(query.from, query.to);
+    const cheques = await this.prisma.cheque.findMany({
+      where: {
+        restaurantId: actor.restaurantId,
+        status: ChequeStatus.CLOSED,
+        ...(businessDayId ? { businessDayId } : {}),
+        ...(range ? { businessDay: { businessDate: range } } : {}),
+      },
+      include: {
+        businessDay: { select: { businessDate: true } },
+        items: { where: { status: { not: 'VOIDED' } }, select: { dishId: true, dishName: true, quantity: true, unitPrice: true } },
+        payments: { select: { method: true, amount: true } },
+      },
+      orderBy: [{ businessDay: { businessDate: 'desc' } }, { closedAt: 'desc' }],
+    });
+    const rows = new Map<string, SoldDishRow>();
+    const payments = new Map<string, PaymentTotals>();
+    let summary: SalesSummary = this.emptySummary();
+    for (const cheque of cheques) {
+      const date = this.dateOnly(cheque.businessDay.businessDate);
+      const subtotal = this.money(cheque.subtotalAmount ?? cheque.items.reduce((sum, item) => sum + Number(item.unitPrice) * item.quantity, 0));
+      const discount = this.money(cheque.discountAmount ?? 0);
+      const serviceFee = this.money(cheque.serviceFeeAmount ?? 0);
+      const total = this.money(cheque.totalAmount ?? Math.max(0, subtotal - discount + serviceFee));
+      summary = this.addSummary(summary, { subtotal, discount, serviceFee, total, chequeCount: 1 });
+      const payment = payments.get(date) ?? this.emptyPaymentTotals(date);
+      for (const item of cheque.payments) {
+        const amount = this.money(item.amount);
+        payment.total = this.money(payment.total + amount);
+        if (item.method === 'CASH') payment.cash = this.money(payment.cash + amount);
+        if (item.method === 'CARD') payment.card = this.money(payment.card + amount);
+        if (item.method === 'TRANSFER') payment.transfer = this.money(payment.transfer + amount);
+      }
+      payments.set(date, payment);
+      if (!subtotal) continue;
+      for (const item of cheque.items) {
+        const itemSubtotal = this.money(Number(item.unitPrice) * item.quantity);
+        const ratio = itemSubtotal / subtotal;
+        const itemDiscount = this.money(discount * ratio);
+        const itemServiceFee = this.money(serviceFee * ratio);
+        const itemTotal = this.money(itemSubtotal - itemDiscount + itemServiceFee);
+        const key = `${date}:${item.dishId}`;
+        const row = rows.get(key) ?? { businessDate: date, dishId: item.dishId, dishName: item.dishName, quantity: 0, grossAmount: 0, discountAmount: 0, serviceFeeAmount: 0, totalAmount: 0 };
+        row.quantity += item.quantity;
+        row.grossAmount = this.money(row.grossAmount + itemSubtotal);
+        row.discountAmount = this.money(row.discountAmount + itemDiscount);
+        row.serviceFeeAmount = this.money(row.serviceFeeAmount + itemServiceFee);
+        row.totalAmount = this.money(row.totalAmount + itemTotal);
+        rows.set(key, row);
+      }
+    }
+    const vatRate = 18;
+    const items = [...rows.values()].map((row) => ({
+      ...row,
+      unitPrice: row.quantity ? this.money(row.grossAmount / row.quantity) : 0,
+      vatRate,
+      vatAmount: this.money(row.totalAmount - row.totalAmount / (1 + vatRate / 100)),
+      amountExcludingVat: this.money(row.totalAmount / (1 + vatRate / 100)),
+    })).sort((a, b) => b.businessDate.localeCompare(a.businessDate) || a.dishName.localeCompare(b.dishName));
+    return {
+      filters: { businessDayId: businessDayId ?? null, from: query.from ?? null, to: query.to ?? null },
+      items,
+      payments: [...payments.values()].sort((a, b) => b.businessDate.localeCompare(a.businessDate)),
+      summary: { ...summary, vatRate, vatAmount: this.money(summary.total - summary.total / (1 + vatRate / 100)), amountExcludingVat: this.money(summary.total / (1 + vatRate / 100)) },
+    };
+  }
+
+  async soldDishesWorkbook(actor: AdminTokenPayload, query: Record<string, string | undefined>): Promise<Buffer> {
+    const report = await this.soldDishes(actor, query);
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Meno';
+    workbook.created = new Date();
+    const currencyFormat = '#,##0.00';
+    const sales = workbook.addWorksheet('Sold dishes', { views: [{ state: 'frozen', ySplit: 1 }] });
+    sales.columns = [
+      { header: 'Business date', key: 'businessDate', width: 15 }, { header: 'Meno dish ID', key: 'dishId', width: 28 },
+      { header: 'Dish name', key: 'dishName', width: 34 }, { header: 'Quantity', key: 'quantity', width: 12 },
+      { header: 'Unit price', key: 'unitPrice', width: 14 }, { header: 'Gross amount (VAT incl.)', key: 'grossAmount', width: 23 },
+      { header: 'Discount', key: 'discountAmount', width: 14 }, { header: 'Service fee', key: 'serviceFeeAmount', width: 15 },
+      { header: 'Total (VAT incl.)', key: 'totalAmount', width: 20 }, { header: 'VAT rate', key: 'vatRate', width: 11 },
+      { header: 'VAT amount', key: 'vatAmount', width: 15 }, { header: 'Total (VAT excl.)', key: 'amountExcludingVat', width: 20 },
+    ];
+    report.items.forEach((row) => sales.addRow(row));
+    this.styleWorkbookSheet(sales, currencyFormat, [5, 6, 7, 8, 9, 11, 12]);
+    const paymentSheet = workbook.addWorksheet('Payments by day', { views: [{ state: 'frozen', ySplit: 1 }] });
+    paymentSheet.columns = [
+      { header: 'Business date', key: 'businessDate', width: 15 }, { header: 'Cash', key: 'cash', width: 15 },
+      { header: 'Card', key: 'card', width: 15 }, { header: 'Transfer', key: 'transfer', width: 15 }, { header: 'Total', key: 'total', width: 16 },
+    ];
+    report.payments.forEach((row) => paymentSheet.addRow(row));
+    this.styleWorkbookSheet(paymentSheet, currencyFormat, [2, 3, 4, 5]);
+    const summary = workbook.addWorksheet('Summary');
+    summary.columns = [{ width: 30 }, { width: 20 }];
+    summary.addRows([
+      ['Report', 'Sold dishes'], ['Closed cheques', report.summary.chequeCount], ['Gross amount (VAT incl.)', report.summary.subtotal],
+      ['Discount', report.summary.discount], ['Service fee', report.summary.serviceFee], ['Total (VAT incl.)', report.summary.total],
+      ['VAT rate', `${report.summary.vatRate}%`], ['VAT amount', report.summary.vatAmount], ['Total (VAT excl.)', report.summary.amountExcludingVat],
+    ]);
+    summary.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    summary.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF667A38' } };
+    [3, 4, 5, 6, 8, 9].forEach((index) => summary.getCell(`B${index}`).numFmt = currencyFormat);
+    return Buffer.from(await workbook.xlsx.writeBuffer());
+  }
+
+  private styleWorkbookSheet(sheet: ExcelJS.Worksheet, currencyFormat: string, currencyColumns: readonly number[]): void {
+    sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF667A38' } };
+    sheet.autoFilter = { from: 'A1', to: `${String.fromCharCode(64 + sheet.columnCount)}1` };
+    sheet.eachRow((row, index) => { if (index > 1) currencyColumns.forEach((column) => row.getCell(column).numFmt = currencyFormat); });
+  }
+
+  private businessDateRange(from: string | undefined, to: string | undefined): Prisma.DateTimeFilter | undefined {
+    const start = from ? new Date(`${from}T00:00:00.000Z`) : undefined;
+    const end = to ? new Date(`${to}T23:59:59.999Z`) : undefined;
+    if (start && Number.isNaN(start.getTime())) return undefined;
+    if (end && Number.isNaN(end.getTime())) return undefined;
+    return start || end ? { ...(start ? { gte: start } : {}), ...(end ? { lte: end } : {}) } : undefined;
+  }
+
+  private money(value: Prisma.Decimal | number): number { return Number(Number(value).toFixed(2)); }
+  private dateOnly(value: Date): string { return value.toISOString().slice(0, 10); }
+  private emptyPaymentTotals(businessDate: string): PaymentTotals { return { businessDate, cash: 0, card: 0, transfer: 0, total: 0 }; }
+  private emptySummary(): SalesSummary { return { chequeCount: 0, subtotal: 0, discount: 0, serviceFee: 0, total: 0 }; }
+  private addSummary(current: SalesSummary, next: SalesSummary): SalesSummary { return { chequeCount: current.chequeCount + next.chequeCount, subtotal: this.money(current.subtotal + next.subtotal), discount: this.money(current.discount + next.discount), serviceFee: this.money(current.serviceFee + next.serviceFee), total: this.money(current.total + next.total) }; }
   private row(cheque: Prisma.ChequeGetPayload<{ include: { openedBy: { select: { firstName: true; lastName: true } }; table: { include: { hall: { select: { name: true } } } }; items: { select: { quantity: true; unitPrice: true; status: true } }; discounts: { select: { amount: true } }; payments: { select: { method: true; amount: true; receivedAmount: true } } } }>, currentServiceFeePercent: number) {
     const subtotal = Number(cheque.subtotalAmount ?? cheque.items.filter((item) => item.status !== 'VOIDED').reduce((sum, item) => sum + Number(item.unitPrice) * item.quantity, 0));
     const serviceFeeAmount = Number(cheque.serviceFeeAmount ?? (subtotal * currentServiceFeePercent / 100).toFixed(2));
@@ -127,6 +260,7 @@ export class ChequeAnalyticsService {
   }
 
   private async businessDayId(restaurantId: string, requestedId: string | undefined): Promise<string | undefined> {
+    if (requestedId === 'all') return undefined;
     if (requestedId) {
       const day = await this.prisma.businessDay.findFirst({ where: { id: requestedId, restaurantId }, select: { id: true } });
       return day?.id;
@@ -206,3 +340,4 @@ export class ChequeAnalyticsService {
     };
   }
 }
+
