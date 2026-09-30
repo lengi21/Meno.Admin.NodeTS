@@ -12,12 +12,12 @@ export class QrMenuService {
 
   async overview(slug: string) {
     const { menu } = await this.qrMenu(slug);
-    return { categories: menu.categories.filter((link) => link.status === 'AVAILABLE' && link.category.status === 'AVAILABLE').map((link) => this.category(link.category)) };
+    return { categories: menu.categories.filter((link) => link.status === 'AVAILABLE' && !link.category.deletedAt && link.category.status === 'AVAILABLE').map((link) => this.category(link.category)) };
   }
 
   async categoryDishes(slug: string, categoryId: string) {
     const { menu } = await this.qrMenu(slug);
-    const linked = menu.categories.some((link) => link.categoryId === categoryId && link.status === 'AVAILABLE' && link.category.status === 'AVAILABLE');
+    const linked = menu.categories.some((link) => link.categoryId === categoryId && link.status === 'AVAILABLE' && !link.category.deletedAt && link.category.status === 'AVAILABLE');
     if (!linked) throw new NotFoundException('Category not found.');
     return menu.dishes.filter((link) => link.dish.categoryId === categoryId && this.visibleDish(link)).map((link) => this.dish(link.dish, link.priceOverride));
   }
@@ -31,7 +31,7 @@ export class QrMenuService {
     const { menu } = await this.qrMenu(slug);
     return {
       categories: menu.categories
-        .filter((link) => link.status === 'AVAILABLE' && link.category.status === 'AVAILABLE')
+        .filter((link) => link.status === 'AVAILABLE' && !link.category.deletedAt && link.category.status === 'AVAILABLE')
         .map((link) => ({ category: this.category(link.category), dishes: menu.dishes.filter((dish) => dish.dish.categoryId === link.categoryId && this.visibleDish(dish)).map((dish) => this.dish(dish.dish, dish.priceOverride)) })),
     };
   }
@@ -156,9 +156,10 @@ export class QrMenuService {
 
   private category(category: any) { return { id: category.id, restaurantId: category.restaurantId, image: category.imageUrl ? { url: category.imageUrl, width: 1200, height: 800 } : null, isVisible: category.status === 'AVAILABLE', sortOrder: category.sortOrder, translations: category.translations.map((item: any) => ({ languageCode: item.languageCode, name: item.name })) }; }
   private dish(dish: any, priceOverride: unknown) { const amount = priceOverride ?? dish.priceAmount; return { id: dish.id, restaurantId: dish.restaurantId, categoryId: dish.categoryId, image: dish.imageUrl ? { url: dish.imageUrl, width: 900, height: 600 } : null, price: { amountMinor: Math.round(Number(amount) * 100), currency: 'GEL' }, calories: dish.calories, isPublished: dish.status !== 'HIDDEN', isAvailable: dish.status === 'AVAILABLE', sortOrder: dish.sortOrder, translations: dish.translations.map((item: any) => ({ languageCode: item.languageCode, name: item.name, description: item.description, recipe: item.recipe })) }; }
-  private visibleDish(link: any) { return link.status === 'AVAILABLE' && link.dish.status === 'AVAILABLE' && link.dish.category.status === 'AVAILABLE'; }
+  private visibleDish(link: any) { return !link.dish.deletedAt && !link.dish.category.deletedAt && link.status === 'AVAILABLE' && link.dish.status === 'AVAILABLE' && link.dish.category.status === 'AVAILABLE'; }
   private dishStatus(value: { isPublished: boolean; isAvailable: boolean }): AvailabilityStatus { return !value.isPublished ? 'HIDDEN' : value.isAvailable ? 'AVAILABLE' : 'PAUSED'; }
   private assertTranslations(value: TranslationInput[], dish = false) { for (const languageCode of ['ka', 'en', 'ru'] as const) { const item = value?.find((translation) => translation.languageCode === languageCode); if (!item?.name?.trim() || (dish && !item.description?.trim())) throw new BadRequestException(`Missing ${languageCode} translation.`); } }
   private assertOrder(existing: string[], next: string[], name: string) { if (existing.length !== next.length || existing.some((id) => !next.includes(id)) || new Set(next).size !== next.length) throw new BadRequestException(`The ${name} order is incomplete.`); }
   private blank(value?: string | null) { return value?.trim() || null; }
 }
+
