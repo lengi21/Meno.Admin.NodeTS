@@ -19,12 +19,12 @@ export class QrMenuService {
     const { menu } = await this.qrMenu(slug);
     const linked = menu.categories.some((link) => link.categoryId === categoryId && link.status === 'AVAILABLE' && !link.category.deletedAt && link.category.status === 'AVAILABLE');
     if (!linked) throw new NotFoundException('Category not found.');
-    return menu.dishes.filter((link) => link.dish.categoryId === categoryId && this.visibleDish(link)).map((link) => this.dish(link.dish, link.priceOverride));
+    return menu.dishes.filter((link) => link.dish.categoryId === categoryId && this.customerDish(link)).map((link) => this.dish(link.dish, link.priceOverride, link.status));
   }
 
   async dishes(slug: string) {
     const { menu } = await this.qrMenu(slug);
-    return menu.dishes.filter((link) => this.visibleDish(link)).map((link) => this.dish(link.dish, link.priceOverride));
+    return menu.dishes.filter((link) => this.customerDish(link)).map((link) => this.dish(link.dish, link.priceOverride, link.status));
   }
 
   async customerMenu(slug: string) {
@@ -32,7 +32,7 @@ export class QrMenuService {
     return {
       categories: menu.categories
         .filter((link) => link.status === 'AVAILABLE' && !link.category.deletedAt && link.category.status === 'AVAILABLE')
-        .map((link) => ({ category: this.category(link.category), dishes: menu.dishes.filter((dish) => dish.dish.categoryId === link.categoryId && this.visibleDish(dish)).map((dish) => this.dish(dish.dish, dish.priceOverride)) })),
+        .map((link) => ({ category: this.category(link.category), dishes: menu.dishes.filter((dish) => dish.dish.categoryId === link.categoryId && this.customerDish(dish)).map((dish) => this.dish(dish.dish, dish.priceOverride, dish.status)) })),
     };
   }
 
@@ -79,7 +79,7 @@ export class QrMenuService {
 
   async adminDishes(slug: string, page: number, pageSize: number, categoryId: string, status: string, query: string) {
     const { menu } = await this.qrMenu(slug);
-    const filtered = menu.dishes.filter((link) => !link.dish.deletedAt && (categoryId === 'all' || link.dish.categoryId === categoryId) && (!query || link.dish.translations.some((translation) => translation.name.toLowerCase().includes(query.toLowerCase()))) && (status === 'all' || (status === 'active' ? this.visibleDish(link) : !this.visibleDish(link))));
+    const filtered = menu.dishes.filter((link) => !link.dish.deletedAt && (categoryId === 'all' || link.dish.categoryId === categoryId) && (!query || link.dish.translations.some((translation) => translation.name.toLowerCase().includes(query.toLowerCase()))) && (status === 'all' || (status === 'active' ? this.availableDish(link) : !this.availableDish(link))));
     const start = (page - 1) * pageSize;
     return { page, pageSize, totalItems: filtered.length, items: filtered.slice(start, start + pageSize).map((link) => ({ dish: this.dish(link.dish, link.priceOverride), category: this.category(link.dish.category) })) };
   }
@@ -155,8 +155,10 @@ export class QrMenuService {
   }
 
   private category(category: any) { return { id: category.id, restaurantId: category.restaurantId, image: category.imageUrl ? { url: category.imageUrl, width: 1200, height: 800 } : null, isVisible: category.status === 'AVAILABLE', sortOrder: category.sortOrder, translations: category.translations.map((item: any) => ({ languageCode: item.languageCode, name: item.name })) }; }
-  private dish(dish: any, priceOverride: unknown) { const amount = priceOverride ?? dish.priceAmount; return { id: dish.id, restaurantId: dish.restaurantId, categoryId: dish.categoryId, image: dish.imageUrl ? { url: dish.imageUrl, width: 900, height: 600 } : null, price: { amountMinor: Math.round(Number(amount) * 100), currency: 'GEL' }, calories: dish.calories, isPublished: dish.status !== 'HIDDEN', isAvailable: dish.status === 'AVAILABLE', sortOrder: dish.sortOrder, translations: dish.translations.map((item: any) => ({ languageCode: item.languageCode, name: item.name, description: item.description, recipe: item.recipe })) }; }
-  private visibleDish(link: any) { return !link.dish.deletedAt && !link.dish.category.deletedAt && link.status === 'AVAILABLE' && link.dish.status === 'AVAILABLE' && link.dish.category.status === 'AVAILABLE'; }
+  private dish(dish: any, priceOverride: unknown, menuDishStatus: AvailabilityStatus = 'AVAILABLE') { const amount = priceOverride ?? dish.priceAmount; const isPublished = menuDishStatus !== 'HIDDEN' && dish.status !== 'HIDDEN'; const isAvailable = isPublished && menuDishStatus === 'AVAILABLE' && dish.status === 'AVAILABLE'; return { id: dish.id, restaurantId: dish.restaurantId, categoryId: dish.categoryId, image: dish.imageUrl ? { url: dish.imageUrl, width: 900, height: 600 } : null, price: { amountMinor: Math.round(Number(amount) * 100), currency: 'GEL' }, calories: dish.calories, isPublished, isAvailable, sortOrder: dish.sortOrder, translations: dish.translations.map((item: any) => ({ languageCode: item.languageCode, name: item.name, description: item.description, recipe: item.recipe })) }; }
+  /** Published paused dishes remain in the QR menu so guests can see they are temporarily unavailable. */
+  private customerDish(link: any) { return !link.dish.deletedAt && !link.dish.category.deletedAt && link.status !== 'HIDDEN' && link.dish.status !== 'HIDDEN' && link.dish.category.status === 'AVAILABLE'; }
+  private availableDish(link: any) { return this.customerDish(link) && link.status === 'AVAILABLE' && link.dish.status === 'AVAILABLE'; }
   private dishStatus(value: { isPublished: boolean; isAvailable: boolean }): AvailabilityStatus { return !value.isPublished ? 'HIDDEN' : value.isAvailable ? 'AVAILABLE' : 'PAUSED'; }
   private assertTranslations(value: TranslationInput[], dish = false) { for (const languageCode of ['ka', 'en', 'ru'] as const) { const item = value?.find((translation) => translation.languageCode === languageCode); if (!item?.name?.trim() || (dish && !item.description?.trim())) throw new BadRequestException(`Missing ${languageCode} translation.`); } }
   private assertOrder(existing: string[], next: string[], name: string) { if (existing.length !== next.length || existing.some((id) => !next.includes(id)) || new Set(next).size !== next.length) throw new BadRequestException(`The ${name} order is incomplete.`); }
