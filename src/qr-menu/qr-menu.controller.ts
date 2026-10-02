@@ -1,14 +1,20 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, HttpCode, HttpStatus, MessageEvent, Param, Post, Query, Sse, UseGuards } from '@nestjs/common';
+import { Observable } from 'rxjs';
 import { InternalApiKeyGuard } from './internal-api-key.guard.js';
 import { QrMenuService } from './qr-menu.service.js';
+import { QrMenuEventsService } from './qr-menu-events.service.js';
 
 @Controller('qr-menu/:slug')
 export class QrMenuController {
-  constructor(private readonly qr: QrMenuService) {}
+  constructor(private readonly qr: QrMenuService, private readonly events: QrMenuEventsService) {}
   @Get('menu-overview') overview(@Param('slug') slug: string) { return this.qr.overview(slug); }
   @Get('categories/:categoryId/dishes') categoryDishes(@Param('slug') slug: string, @Param('categoryId') categoryId: string) { return this.qr.categoryDishes(slug, categoryId); }
   @Get('dishes') dishes(@Param('slug') slug: string) { return this.qr.dishes(slug); }
   @Get('customer-menu') customerMenu(@Param('slug') slug: string) { return this.qr.customerMenu(slug); }
+  @Sse('events')
+  @Header('Cache-Control', 'no-cache, no-transform')
+  @Header('X-Accel-Buffering', 'no')
+  eventsStream(@Param('slug') slug: string): Observable<MessageEvent> { return this.events.stream(slug); }
 }
 
 @Controller('integrations/qr-menu/:slug/admin')

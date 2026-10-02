@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { AvailabilityStatus, MenuPurpose } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { QrMenuEventsService } from './qr-menu-events.service.js';
 
 type TranslationInput = { languageCode: 'ka' | 'en' | 'ru'; name: string; description?: string; recipe?: string | null };
 type CategoryDraft = { imageUrl?: string; isVisible: boolean; translations: TranslationInput[] };
@@ -8,7 +9,7 @@ type DishDraft = { categoryId: string; imageUrl?: string; priceAmountMinor: numb
 
 @Injectable()
 export class QrMenuService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly events: QrMenuEventsService) {}
 
   async overview(slug: string) {
     const { menu } = await this.qrMenu(slug);
@@ -47,6 +48,7 @@ export class QrMenuService {
     const sortOrder = menu.categories.length + 1;
     const category = await this.prisma.category.create({ data: { restaurantId: restaurant.id, imageUrl: this.blank(draft.imageUrl), status: draft.isVisible ? 'AVAILABLE' : 'HIDDEN', sortOrder, translations: { create: draft.translations.map(({ languageCode, name }) => ({ languageCode, name: name.trim() })) } }, include: { translations: true } });
     await this.prisma.menuCategory.create({ data: { menuId: menu.id, categoryId: category.id, sortOrder } });
+    this.events.publish(slug);
     return this.category(category);
   }
 
@@ -55,6 +57,7 @@ export class QrMenuService {
     this.assertTranslations(draft.translations);
     if (!menu.categories.some((item) => item.categoryId === categoryId)) throw new NotFoundException('Category not found.');
     const category = await this.prisma.category.update({ where: { id: categoryId }, data: { restaurantId: restaurant.id, imageUrl: this.blank(draft.imageUrl), status: draft.isVisible ? 'AVAILABLE' : 'HIDDEN', translations: { deleteMany: {}, create: draft.translations.map(({ languageCode, name }) => ({ languageCode, name: name.trim() })) } }, include: { translations: true } });
+    this.events.publish(slug);
     return this.category(category);
   }
 
@@ -66,6 +69,7 @@ export class QrMenuService {
       await tx.menuDish.deleteMany({ where: { menuId: menu.id, dish: { categoryId } } });
       await tx.menuCategory.delete({ where: { menuId_categoryId: { menuId: menu.id, categoryId } } });
     });
+    this.events.publish(slug);
   }
 
   async reorderCategories(slug: string, categoryIds: string[]) {
@@ -75,6 +79,7 @@ export class QrMenuService {
       this.prisma.category.update({ where: { id }, data: { sortOrder: index + 1 } }),
       this.prisma.menuCategory.update({ where: { menuId_categoryId: { menuId: menu.id, categoryId: id } }, data: { sortOrder: index + 1 } }),
     ]));
+    this.events.publish(slug);
   }
 
   async adminDishes(slug: string, page: number, pageSize: number, categoryId: string, status: string, query: string) {
@@ -93,6 +98,7 @@ export class QrMenuService {
     const sortOrder = menu.dishes.filter((item) => item.dish.categoryId === draft.categoryId).length + 1;
     const dish = await this.prisma.dish.create({ data: { restaurantId: restaurant.id, categoryId: draft.categoryId, imageUrl: this.blank(draft.imageUrl), priceAmount: draft.priceAmountMinor / 100, calories: draft.calories ?? null, status: this.dishStatus(draft), sortOrder, translations: { create: draft.translations.map((item) => ({ languageCode: item.languageCode, name: item.name.trim(), description: item.description?.trim() || '', recipe: this.blank(item.recipe ?? undefined) })) } }, include: { translations: true } });
     await this.prisma.menuDish.create({ data: { menuId: menu.id, dishId: dish.id, sortOrder } });
+    this.events.publish(slug);
     return this.dish(dish, null);
   }
 
@@ -103,6 +109,7 @@ export class QrMenuService {
     const linked = menu.dishes.find((item) => item.dishId === dishId);
     if (!linked || !menu.categories.some((item) => item.categoryId === draft.categoryId)) throw new NotFoundException('Dish not found.');
     const dish = await this.prisma.dish.update({ where: { id: dishId }, data: { restaurantId: restaurant.id, categoryId: draft.categoryId, imageUrl: this.blank(draft.imageUrl), priceAmount: draft.priceAmountMinor / 100, calories: draft.calories ?? null, status: this.dishStatus(draft), translations: { deleteMany: {}, create: draft.translations.map((item) => ({ languageCode: item.languageCode, name: item.name.trim(), description: item.description?.trim() || '', recipe: this.blank(item.recipe ?? undefined) })) } }, include: { translations: true } });
+    this.events.publish(slug);
     return this.dish(dish, linked.priceOverride);
   }
 
@@ -110,6 +117,7 @@ export class QrMenuService {
     const { menu } = await this.qrMenu(slug);
     if (!menu.dishes.some((item) => item.dishId === dishId)) throw new NotFoundException('Dish not found.');
     const dish = await this.prisma.dish.update({ where: { id: dishId }, data: { status: this.dishStatus({ isPublished, isAvailable }) }, include: { translations: true } });
+    this.events.publish(slug);
     return this.dish(dish, null);
   }
 
@@ -120,6 +128,7 @@ export class QrMenuService {
       this.prisma.dish.update({ where: { id: dishId }, data: { status: 'HIDDEN', deletedAt: new Date() } }),
       this.prisma.menuDish.delete({ where: { menuId_dishId: { menuId: menu.id, dishId } } }),
     ]);
+    this.events.publish(slug);
   }
 
   async reorderDishes(slug: string, categoryId: string, dishIds: string[]) {
@@ -130,6 +139,7 @@ export class QrMenuService {
       this.prisma.dish.update({ where: { id }, data: { sortOrder: index + 1 } }),
       this.prisma.menuDish.update({ where: { menuId_dishId: { menuId: menu.id, dishId: id } }, data: { sortOrder: index + 1 } }),
     ]));
+    this.events.publish(slug);
   }
 
   async moveDish(slug: string, categoryId: string, dishId: string, targetDishId: string, placeAfter: boolean) {
